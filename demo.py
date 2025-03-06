@@ -32,7 +32,9 @@ def visualize_2d(results_2d):
     for idx in tqdm(range(len(im_paths))):
 
         im_p = im_paths[idx]
-        out_p = im_p.replace("/images/", '/processed/2d_keypoints/')
+        
+        
+        out_p = im_p.replace("images", '2d_keypoints')
 
         im = Image.open(im_p)
 
@@ -50,7 +52,7 @@ def visualize_2d(results_2d):
     for idx in tqdm(range(len(im_paths))):
 
         im_p = im_paths[idx]
-        out_p = im_p.replace("/images/", '/processed/hpe_vis/')
+        out_p = im_p.replace("images", 'processed_hpe_vis')
 
         im = Image.open(im_p)
 
@@ -175,6 +177,7 @@ def main():
     args = parser.parse_args()
     
     args.img_folder = f'../data/{args.seq_name}/images'
+    args.img_folder = f'./images'
 
     # Download and load checkpoints
     download_models(CACHE_DIR_HAMER)
@@ -228,6 +231,7 @@ def main():
         img = img_cv2.copy()[:, :, ::-1]
 
         det_instances = det_out['instances']
+        
         valid_idx = (det_instances.pred_classes==0) & (det_instances.scores > 0.5)
         pred_bboxes=det_instances.pred_boxes.tensor[valid_idx].cpu().numpy()
         pred_scores=det_instances.scores[valid_idx].cpu().numpy()
