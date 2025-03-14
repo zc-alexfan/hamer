@@ -217,9 +217,9 @@ def main():
     os.makedirs(args.out_folder, exist_ok=True)
 
     # Get all demo images ends with .jpg or .png
-    img_paths = [img for end in args.file_type for img in Path(args.img_folder).glob(end)]
+    img_paths = sorted([img for end in args.file_type for img in Path(args.img_folder).glob(end)])
     assert len(img_paths) > 0, f"No images found in {args.img_folder}"
-
+    all_out = {}
     # Iterate over all images in folder
     print('Running inference on images')
     pred_list = []
@@ -231,10 +231,12 @@ def main():
         img = img_cv2.copy()[:, :, ::-1]
 
         det_instances = det_out['instances']
-        
         valid_idx = (det_instances.pred_classes==0) & (det_instances.scores > 0.5)
+
+        # valid_idx = torch.argmax(det_instances.scores).view(-1)
         pred_bboxes=det_instances.pred_boxes.tensor[valid_idx].cpu().numpy()
         pred_scores=det_instances.scores[valid_idx].cpu().numpy()
+
 
         # Detect human keypoints for each person
         vitposes_out = cpm.predict_pose(
@@ -246,34 +248,38 @@ def main():
         is_right = []
 
         # Use hands based on hand keypoint detections
+        confs = []
         for vitposes in vitposes_out:
             left_hand_keyp = vitposes['keypoints'][-42:-21]
             right_hand_keyp = vitposes['keypoints'][-21:]
-
             # Rejecting not confident detections
             keyp = left_hand_keyp
-            valid = keyp[:,2] > 0.5
+            valid = keyp[:,2] > 0.01
             if sum(valid) > 3:
-                bbox = [keyp[valid,0].min(), keyp[valid,1].min(), keyp[valid,0].max(), keyp[valid,1].max()]
+                bbox = [keyp[valid,0].min(), keyp[valid,1].min(), keyp[valid,0].max(), keyp[valid,1].max(), sum(valid)]
                 bboxes.append(bbox)
-                is_right.append(0)
+                is_right.append(1)
             keyp = right_hand_keyp
-            valid = keyp[:,2] > 0.5
+            valid = keyp[:,2] > 0.01
             if sum(valid) > 3:
-                bbox = [keyp[valid,0].min(), keyp[valid,1].min(), keyp[valid,0].max(), keyp[valid,1].max()]
+                bbox = [keyp[valid,0].min(), keyp[valid,1].min(), keyp[valid,0].max(), keyp[valid,1].max(), sum(valid)]
                 bboxes.append(bbox)
                 is_right.append(1)
 
         if len(bboxes) == 0:
             continue
-
+        # import pdb; pdb.set_trace()
         boxes = np.stack(bboxes)
         right = np.stack(is_right)
+        # conf = boxes[:, -1]
+        # idxx = np.argmax(conf)
+        # boxes = boxes[idxx+1:idxx+2]
+        # right = right[idxx+1:idxx+2]
 
         # Run reconstruction on all detected hands
         dataset = ViTDetDataset(model_cfg, img_cv2, boxes, right, rescale_factor=args.rescale_factor)
         dataloader = torch.utils.data.DataLoader(dataset, batch_size=8, shuffle=False, num_workers=0)
-
+        
         all_verts = []
         all_cam_t = []
         all_right = []
@@ -282,6 +288,7 @@ def main():
             batch = recursive_to(batch, device)
             with torch.no_grad():
                 out = model(batch)
+                
 
             multiplier = (2*batch['right']-1)
             pred_cam = out['pred_cam']
@@ -292,6 +299,27 @@ def main():
             multiplier = (2*batch['right']-1)
             scaled_focal_length = model_cfg.EXTRA.FOCAL_LENGTH / model_cfg.MODEL.IMAGE_SIZE * img_size.max()
             pred_cam_t_full = cam_crop_to_full(pred_cam, box_center, box_size, img_size, scaled_focal_length).detach().cpu().numpy()
+            
+            v3d_cam = out['pred_vertices'].cpu().numpy() + pred_cam_t_full[:, None, :]
+            cx, cy = img_size[0]
+            cx = float(cx)/2
+            cy = float(cy)/2
+            fx = float(scaled_focal_length)
+            fy = fx
+
+            myK = np.array(
+            [    [fx, 0, cx],
+                [0, fy, cy],
+                [0, 0, 1],]
+            )
+            from PIL import Image
+            palm_out = {}
+            palm_out['v3d_cam'] = v3d_cam
+            palm_out['K'] = myK
+            palm_out['im'] = Image.open(str(img_path))
+            all_out[str(img_path)] = palm_out
+            
+            
 
             # Render the result
             batch_size = batch['img'].shape[0]
@@ -331,21 +359,22 @@ def main():
                 verts[:,0] = (2*is_right-1)*verts[:,0]
                 jts[:,0] = (2*is_right-1)*jts[:,0]
                 cam_t = pred_cam_t_full[n]
-                all_verts.append(verts)
-                all_cam_t.append(cam_t)
-                all_right.append(is_right)
-                pred_dict = {}
-                pred_dict['cam_t.full'] = cam_t
-                pred_dict['verts'] = verts
-                pred_dict['jts'] = jts
-                pred_dict['is_right'] = is_right
-                pred_dict['img_path'] = str(img_path)
+                if is_right == 1.0:
+                    all_verts.append(verts)
+                    all_cam_t.append(cam_t)
+                    all_right.append(is_right)
+                    pred_dict = {}
+                    pred_dict['cam_t.full'] = cam_t
+                    pred_dict['verts'] = verts
+                    pred_dict['jts'] = jts
+                    pred_dict['is_right'] = is_right
+                    pred_dict['img_path'] = str(img_path)
 
-                fx = fy = float(scaled_focal_length.cpu().numpy())
-                cx, cy = img_size[n].cpu().detach().numpy() / 2
-                K = np.array([[fx, 0, cx], [0, fy, cy], [0, 0, 1]])
-                pred_dict['K'] = K
-                pred_list.append(pred_dict)
+                    fx = fy = float(scaled_focal_length.cpu().numpy())
+                    cx, cy = img_size[n].cpu().detach().numpy() / 2
+                    K = np.array([[fx, 0, cx], [0, fy, cy], [0, 0, 1]])
+                    pred_dict['K'] = K
+                    pred_list.append(pred_dict)
 
                 # Save all meshes to disk
                 if args.save_mesh:
@@ -368,7 +397,8 @@ def main():
             input_img_overlay = input_img[:,:,:3] * (1-cam_view[:,:,3:]) + cam_view[:,:,:3] * cam_view[:,:,3:]
 
             cv2.imwrite(os.path.join(args.out_folder, f'{img_fn}_all.jpg'), 255*input_img_overlay[:, :, ::-1])
-
+    import pdb; pdb.set_trace()
+    np.save('./all_out.npy', all_out)
     import os.path as op
     out_3d_p = op.join(args.img_folder, '../processed/v3d.npy')
     out_2d_p = op.join(args.img_folder, '../processed/j2d.full.npy')
